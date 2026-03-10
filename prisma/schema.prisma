@@ -1,0 +1,202 @@
+generator client {
+provider = "prisma-client-js"
+}
+
+datasource db {
+provider = "postgresql"
+}
+
+
+enum OtpPurpose {
+REGISTER
+RESET_PASSWORD
+}
+
+enum TeacherRole {
+TEACHER
+ADMIN
+}
+
+enum Weekday {
+MON
+TUE
+WED
+THU
+FRI
+SAT
+SUN
+}
+
+// =======================
+// Teacher (Email-based auth)
+// =======================
+model Teacher {
+id Int @id @default(autoincrement())
+name String
+email String @unique @db.VarChar(255)
+passwordHash String?
+isVerified Boolean @default(false)
+isActive Boolean @default(true)
+role TeacherRole @default(TEACHER)
+refreshTokenHash String?
+avatarUrl String?
+createdAt DateTime @default(now())
+updatedAt DateTime @updatedAt
+telegramLinks TelegramLink[]
+groups Group[]
+subscription Subscription? @relation("TeacherSubscription")
+billingPayments BillingPayment[] @relation("TeacherBillingPayments")
+}
+
+// =======================
+// Email OTP
+// =======================
+model OtpCode {
+id Int @id @default(autoincrement())
+email String @db.VarChar(255)
+codeHash String
+purpose OtpPurpose
+attempts Int @default(0)
+expiresAt DateTime
+createdAt DateTime @default(now())
+
+@@index([email, purpose])
+@@index([expiresAt])
+}
+
+// =======================
+// Groups / Students / Schedule
+// =======================
+model Group {
+id Int @id @default(autoincrement())
+teacherId Int
+name String
+subject String?
+monthlyPrice Decimal @db.Decimal(10, 2)
+days String[] // UI uchun, schedule'dan computed
+time String? // UI uchun
+createdAt DateTime @default(now())
+
+teacher Teacher @relation(fields: [teacherId], references: [id], onDelete: Cascade)
+students Student[]
+schedules GroupSchedule[]
+
+@@index([teacherId])
+}
+
+model Student {
+  id          Int      @id @default(autoincrement())
+  name        String
+  parentPhone String?
+  isActive    Boolean  @default(true)
+  isDeleted   Boolean  @default(false)
+  groupId     Int?     // made optional for unassignment
+  createdAt   DateTime @default(now())
+
+  group    Group?    @relation(fields: [groupId], references: [id], onDelete: SetNull)
+  payments Payment[]
+
+  @@index([groupId])
+  @@index([isActive])
+  @@index([isDeleted])
+}
+
+model GroupSchedule {
+id Int @id @default(autoincrement())
+groupId Int
+weekday Weekday
+startTime String @db.VarChar(5) // "HH:MM"
+durationMin Int @default(90)
+isActive Boolean @default(true)
+
+createdAt DateTime @default(now())
+
+group Group @relation(fields: [groupId], references: [id], onDelete: Cascade)
+
+@@index([groupId, weekday])
+}
+
+// =======================
+// Student payments (monthly)
+// =======================
+enum PaymentStatus {
+  DUE
+  PARTIAL
+  PAID
+}
+
+model Payment {
+  id         Int           @id @default(autoincrement())
+  studentId  Int
+  month      String
+  amount     Decimal
+  paidAmount Decimal       @default(0)
+  status     PaymentStatus @default(DUE)
+  paidAt     DateTime?
+  createdAt  DateTime      @default(now())
+
+  student Student @relation(fields: [studentId], references: [id])
+
+  @@unique([studentId, month])
+}
+
+// =======================
+// SaaS Subscription
+// =======================
+enum SubscriptionStatus {
+TRIAL
+ACTIVE
+EXPIRED
+}
+
+model Subscription {
+id Int @id @default(autoincrement())
+teacherId Int @unique
+status SubscriptionStatus @default(TRIAL)
+trialEndsAt DateTime?
+currentPeriodEndsAt DateTime?
+createdAt DateTime @default(now())
+updatedAt DateTime @updatedAt
+
+teacher Teacher @relation("TeacherSubscription", fields: [teacherId], references: [id], onDelete: Cascade)
+}
+
+// =======================
+// Billing: teacher submits proof, admin reviews
+// =======================
+enum BillingPaymentStatus {
+PENDING
+CONFIRMED
+REJECTED
+}
+
+model BillingPayment {
+id Int @id @default(autoincrement())
+teacherId Int
+amount Decimal @db.Decimal(10, 2)
+months Int @default(1)
+status BillingPaymentStatus @default(PENDING)
+proofUrl String?
+note String?
+rejectReason String?
+confirmedAt DateTime?
+createdAt DateTime @default(now())
+
+teacher Teacher @relation("TeacherBillingPayments", fields: [teacherId], references: [id], onDelete: Cascade)
+
+@@index([teacherId])
+@@index([status])
+}
+
+model TelegramLink {
+id Int @id @default(autoincrement())
+teacherId Int
+phone String @db.VarChar(32) // normalize qilingan telefon
+chatId String @db.VarChar(32) // Telegram chat id (string saqlaymiz, xavfsiz)
+linkedAt DateTime @default(now())
+
+teacher Teacher @relation(fields: [teacherId], references: [id], onDelete: Cascade)
+
+@@unique([teacherId, phone])
+@@index([chatId])
+}
