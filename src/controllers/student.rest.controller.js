@@ -174,7 +174,7 @@ exports.UPDATE = async (req, res) => {
       } else {
         const d = new Date(paymentStartDate);
         if (isNaN(d.getTime())) {
-          return res.status(400).json({ message: "paymentStartDate noto'g'ri format" });
+          return res.status(400).json({ message: "To'lov boshlanish sanasi noto'g'ri" });
         }
         data.paymentStartDate = d;
       }
@@ -184,11 +184,17 @@ exports.UPDATE = async (req, res) => {
       if (customMonthlyFee === '' || customMonthlyFee === null) {
         data.customMonthlyFee = null;
       } else {
-        const fee = Number(customMonthlyFee);
-        if (!Number.isFinite(fee) || fee < 0) {
-          return res.status(400).json({ message: "customMonthlyFee noto'g'ri" });
+        // Sanitize: remove spaces and commas
+        const cleaned = String(customMonthlyFee).replace(/[\s,]/g, '');
+        if (cleaned === '') {
+          data.customMonthlyFee = null;
+        } else {
+          const fee = Number(cleaned);
+          if (!Number.isFinite(fee) || fee < 0 || fee > 100000000) {
+            return res.status(400).json({ message: "Oylik to'lov summasi noto'g'ri (0 - 100,000,000 oralig'i)" });
+          }
+          data.customMonthlyFee = fee;
         }
-        data.customMonthlyFee = fee === 0 ? null : fee;
       }
     }
 
@@ -358,6 +364,7 @@ exports.HISTORY = async (req, res) => {
       select: {
         id: true, month: true, amount: true, paidAmount: true,
         status: true, paidAt: true, createdAt: true,
+        histories: { orderBy: { createdAt: "asc" }, select: { amount: true, createdAt: true } }
       },
     });
 
@@ -395,6 +402,7 @@ exports.HISTORY = async (req, res) => {
         amount: String(p.amount),
         paidAmount: String(p.paidAmount || 0),
         remaining: String(Math.max(0, Number(p.amount) - Number(p.paidAmount || 0))),
+        histories: p.histories.map(h => ({ ...h, amount: String(h.amount) }))
       })),
       attendance: attendance.map(a => ({
         id: a.id,
@@ -414,6 +422,44 @@ exports.HISTORY = async (req, res) => {
     });
   } catch (err) {
     console.error("[STUDENT HISTORY]", err);
+    return res.status(500).json({ message: "Server xatoligi" });
+  }
+};
+
+// POST /api/students/:id/message
+exports.MESSAGE = async (req, res) => {
+  try {
+    const teacherId = req.user.teacherId;
+    const id = Number(req.params.id);
+    const { message } = req.body;
+
+    if (!Number.isFinite(id)) return res.status(400).json({ message: "ID noto'g'ri" });
+    if (!message || !message.trim()) return res.status(400).json({ message: "Xabar matni kerak" });
+
+    const student = await prisma.student.findFirst({
+      // We check that the student belongs to the teacher by checking group, or history of group.
+      // Easiest is to allow messaging if student isn't completely deleted. Wait, what if they are archived? We can still message them?
+      // Yes, just check parentPhone exists.
+      where: { id },
+      select: { parentPhone: true, name: true, group: { select: { teacherId: true } } }
+    });
+
+    if (!student) return res.status(404).json({ message: "O'quvchi topilmadi" });
+    // basic check
+    if (student.group && student.group.teacherId !== teacherId) return res.status(403).json({ message: "Sizga tegishli emas" });
+    if (!student.parentPhone) return res.status(400).json({ message: "O'quvchining telefon raqami yo'q" });
+
+    const { sendMessageToPhone } = require("../services/telegram.service");
+    const bot = req.app.get("telegramBot");
+
+    const sent = await sendMessageToPhone(bot, teacherId, student.parentPhone, message);
+    if (!sent) {
+      return res.status(400).json({ message: "Telegram bog'lanmagan yoki xatolik yuz berdi" });
+    }
+
+    return res.json({ message: "Xabar yuborildi" });
+  } catch (err) {
+    console.error("[STUDENT MESSAGE]", err);
     return res.status(500).json({ message: "Server xatoligi" });
   }
 };

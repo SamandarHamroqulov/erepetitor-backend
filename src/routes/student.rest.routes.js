@@ -11,6 +11,8 @@ studentRestRouter.get("/:id/history", auth, s.HISTORY);
 studentRestRouter.patch("/:id", auth, validateUpdate, s.UPDATE);
 studentRestRouter.patch("/:id/transfer", auth, s.TRANSFER);  // boshqa guruhga o'tkazish
 studentRestRouter.delete("/:id", auth, s.DELETE);             // guruhdan chiqarish (arxivlash)
+studentRestRouter.post("/:id/archive", auth, s.ARCHIVE);      // haqiqiy arxivlash
 studentRestRouter.post("/:id/restore", auth, s.RESTORE);      // arxivdan tiklash
+studentRestRouter.post("/:id/message", auth, s.MESSAGE);      // xabar yuborish
 
 module.exports = studentRestRouter;

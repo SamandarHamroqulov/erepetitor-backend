@@ -140,8 +140,18 @@ model Payment {
   createdAt  DateTime      @default(now())
 
   student Student @relation(fields: [studentId], references: [id])
+  histories PaymentHistory[]
 
   @@unique([studentId, month])
+}
+
+model PaymentHistory {
+  id        Int      @id @default(autoincrement())
+  paymentId Int
+  amount    Decimal
+  createdAt DateTime @default(now())
+
+  payment   Payment  @relation(fields: [paymentId], references: [id], onDelete: Cascade)
 }
 
 // =======================

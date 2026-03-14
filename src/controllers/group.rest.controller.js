@@ -1,5 +1,6 @@
 const prisma = require("../services/prismaClient");
 const { normalizeMonthYM } = require("../utils/month");
+const { normalizeUzPhone } = require("../utils/phone");
 
 const DAY_MAP = {
   dushanba: "MON", du: "MON",  mon: "MON",
@@ -16,6 +17,12 @@ function parseDays(days) {
   return [...new Set(
     days.map(d => DAY_MAP[String(d).trim().toLowerCase()]).filter(Boolean)
   )];
+}
+
+function getMonthYYYYMM(d = new Date()) {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  return `${y}-${m}`;
 }
 
 // GET /api/groups
@@ -128,9 +135,10 @@ exports.DETAIL = async (req, res) => {
       orderBy: [{ isActive: "desc" }, { createdAt: "desc" }],
       select: {
         id: true, name: true, parentPhone: true, isActive: true, createdAt: true,
+        customMonthlyFee: true, paymentStartDate: true,
         payments: {
           where: { month },
-          select: { id: true, status: true, amount: true, paidAt: true },
+          select: { id: true, studentId: true, status: true, amount: true, paidAmount: true, paidAt: true },
           take: 1,
         },
       },
@@ -139,20 +147,24 @@ exports.DETAIL = async (req, res) => {
     return res.json({
       month,
       group: { ...group, monthlyPrice: String(group.monthlyPrice) },
-      students: {
-        total: totalStudents,
-        active: activeStudents,
-        items: students.map((s) => ({
-          id: s.id,
-          name: s.name,
-          parentPhone: s.parentPhone,
-          isActive: s.isActive,
-          createdAt: s.createdAt,
-          paymentThisMonth: s.payments[0]
-            ? { ...s.payments[0], amount: String(s.payments[0].amount) }
-            : null,
-        })),
-      },
+      students: students.map((s) => ({
+        id: s.id,
+        name: s.name,
+        parentPhone: s.parentPhone,
+        isActive: s.isActive,
+        createdAt: s.createdAt,
+        customMonthlyFee: s.customMonthlyFee ? String(s.customMonthlyFee) : null,
+        paymentStartDate: s.paymentStartDate,
+        paymentThisMonth: s.payments[0]
+          ? { 
+              ...s.payments[0], 
+              amount: String(s.payments[0].amount),
+              paidAmount: String(s.payments[0].paidAmount || 0),
+              remaining: String(Number(s.payments[0].amount) - Number(s.payments[0].paidAmount || 0)),
+              status: s.payments[0].status
+            }
+          : null,
+      })),
       paymentsSummary: {
         counts: { due: dueCount, paid: paidCount, total: dueCount + paidCount },
         sums: {
@@ -288,9 +300,11 @@ exports.OVERVIEW = async (req, res) => {
         parentPhone: true,
         isActive: true,
         createdAt: true,
+        customMonthlyFee: true,
+        paymentStartDate: true,
         payments: {
           where: { month },
-          select: { id: true, status: true, amount: true, paidAt: true },
+          select: { id: true, studentId: true, status: true, amount: true, paidAmount: true, paidAt: true },
           take: 1,
         },
       },
@@ -315,8 +329,15 @@ exports.OVERVIEW = async (req, res) => {
         parentPhone: s.parentPhone,
         isActive: s.isActive,
         createdAt: s.createdAt,
+        customMonthlyFee: s.customMonthlyFee ? String(s.customMonthlyFee) : null,
+        paymentStartDate: s.paymentStartDate,
         paymentThisMonth: s.payments[0]
-          ? { ...s.payments[0], amount: String(s.payments[0].amount) }
+          ? { 
+              ...s.payments[0], 
+              amount: String(s.payments[0].amount),
+              paidAmount: String(s.payments[0].paidAmount || 0),
+              remaining: String(Number(s.payments[0].amount) - Number(s.payments[0].paidAmount || 0))
+            }
           : null,
       })),
       paymentsSummary: {
@@ -449,6 +470,156 @@ exports.EDIT = async (req, res) => {
     return res.json({ message: "Guruh muvaffaqiyatli tahrirlandi", group: updatedGroup });
   } catch (err) {
     console.error("[GROUP EDIT]", err);
+    return res.status(500).json({ message: "Server xatoligi" });
+  }
+};
+
+const ExcelJS = require('exceljs');
+
+// POST /api/groups/:id/students/import-preview
+exports.IMPORT_PREVIEW = async (req, res) => {
+  try {
+    if (!req.files || !req.files.file) {
+      return res.status(400).json({ message: "Fayl yuklanmadi" });
+    }
+    
+    const file = req.files.file;
+    const workbook = new ExcelJS.Workbook();
+    try {
+      await workbook.xlsx.load(file.data);
+    } catch (e) {
+      await workbook.csv.read(file.data);
+    }
+    
+    const worksheet = workbook.worksheets[0];
+    if (!worksheet) return res.status(400).json({ message: "Varag' topilmadi" });
+
+    const students = [];
+    let rowCount = 0;
+    worksheet.eachRow((row, rowNumber) => {
+      rowCount++;
+      if (rowNumber === 1 && rowCount === 1) { 
+         const firstCell = String(row.getCell(1).text || "").toLowerCase();
+         if (firstCell.includes("ism") || firstCell.includes("f.i.o") || firstCell === "name") return;
+      }
+      
+      const name = row.getCell(1).text?.trim();
+      if (!name) return; // skip empty rows
+
+      const phoneRaw = row.getCell(2).text?.trim() || row.getCell(2).value?.toString()?.trim() || "";
+      let parentPhone = normalizeUzPhone(phoneRaw) || null;
+
+      const feeRaw = row.getCell(3).text?.trim() || row.getCell(3).value?.toString()?.trim() || "";
+      let customMonthlyFee = null;
+      let error = null;
+
+      if (feeRaw) {
+         const cleaned = String(feeRaw).replace(/[\s,]/g, '');
+         if (cleaned !== '') {
+            const num = Number(cleaned);
+            if (Number.isFinite(num) && num >= 0 && num <= 100000000) {
+               customMonthlyFee = num;
+            } else {
+               error = "Oylik to'lov summasi noto'g'ri (0 - 100,000,000 oralig'i)";
+            }
+         }
+      }
+      
+      students.push({
+         row: rowNumber,
+         name,
+         parentPhone,
+         customMonthlyFee,
+         error
+      });
+    });
+    
+    return res.json({ students });
+  } catch (err) {
+    console.error("[IMPORT PREVIEW]", err);
+    return res.status(500).json({ message: err.message || "Faylni o'qishda xatolik" });
+  }
+};
+
+// POST /api/groups/:id/students/import-bulk
+exports.IMPORT_BULK = async (req, res) => {
+  try {
+    const teacherId = req.user.teacherId;
+    const groupId = Number(req.params.id);
+    const { students } = req.body; 
+    
+    if (!Array.isArray(students) || students.length === 0) {
+      return res.status(400).json({ message: "O'quvchilar ro'yxati bosh" });
+    }
+
+    const group = await prisma.group.findFirst({ where: { id: groupId, teacherId }, select: { id: true } });
+    if (!group) return res.status(404).json({ message: "Guruh topilmadi" });
+
+    const existingPhonesInGroup = new Set(
+       (await prisma.student.findMany({
+          where: { groupId, isDeleted: false, parentPhone: { not: null } },
+          select: { parentPhone: true }
+       })).map(s => s.parentPhone)
+    );
+
+    const validStudents = [];
+    const errors = [];
+    let skipped = 0;
+
+    for (let i = 0; i < students.length; i++) {
+       const s = students[i];
+       const rowNum = s.row || (i + 1);
+
+       if (!s.name?.trim()) {
+          errors.push({ row: rowNum, reason: "Ism kiritilmagan" });
+          skipped++;
+          continue;
+       }
+
+       let pPhone = s.parentPhone ? normalizeUzPhone(s.parentPhone) : null;
+       if (pPhone && existingPhonesInGroup.has(pPhone)) {
+          errors.push({ row: rowNum, reason: `Telefon raqami guruhda allaqachon mavjud (${pPhone})` });
+          skipped++;
+          continue;
+       }
+
+       let fee = null;
+       if (s.customMonthlyFee !== null && s.customMonthlyFee !== undefined && s.customMonthlyFee !== "") {
+          const cleaned = String(s.customMonthlyFee).replace(/[\s,]/g, '');
+          if (cleaned !== '') {
+             const num = Number(cleaned);
+             if (Number.isFinite(num) && num >= 0 && num <= 100000000) {
+                fee = num;
+             } else {
+                errors.push({ row: rowNum, reason: `To'lov qiymati noto'g'ri: ${s.customMonthlyFee}` });
+                skipped++;
+                continue;
+             }
+          }
+       }
+
+       if (pPhone) existingPhonesInGroup.add(pPhone); 
+       
+       validStudents.push({
+          name: s.name.trim(),
+          parentPhone: pPhone,
+          customMonthlyFee: fee,
+          groupId
+       });
+    }
+
+    let imported = 0;
+    if (validStudents.length > 0) {
+       const created = await prisma.student.createMany({
+          data: validStudents,
+          skipDuplicates: true
+       });
+       imported = created.count;
+    }
+
+    return res.json({ imported, skipped, errors });
+  } catch (err) {
+    console.error("[IMPORT BULK]", err);
     return res.status(500).json({ message: "Server xatoligi" });
   }
 };

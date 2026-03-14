@@ -119,9 +119,23 @@ exports.BULK_MARK = async (req, res) => {
     });
     if (!group) return res.status(404).json({ message: "Guruh topilmadi" });
 
+    // Ensure we strictly only apply attendance to currently active, non-deleted students of this group
+    const activeStudentIdsRaw = await prisma.student.findMany({
+      where: { groupId, isDeleted: false, isActive: true },
+      select: { id: true },
+    });
+    const activeStudentIds = new Set(activeStudentIdsRaw.map((s) => s.id));
+
+    // Filter out records for students who are no longer active or deleted
+    const validRecords = records.filter((r) => activeStudentIds.has(Number(r.studentId)));
+
+    if (validRecords.length === 0) {
+      return res.json({ message: "Davomat saqlanadigan faol o'quvchilar yo'q", count: 0 });
+    }
+
     // Bulk upsert in a transaction
     const results = await prisma.$transaction(
-      records.map((r) =>
+      validRecords.map((r) =>
         prisma.attendance.upsert({
           where: {
             studentId_groupId_date: {
@@ -142,7 +156,7 @@ exports.BULK_MARK = async (req, res) => {
     );
 
     // ── Send Telegram notifications for ABSENT students (fire-and-forget) ──
-    const absentStudentIds = records
+    const absentStudentIds = validRecords
       .filter((r) => r.status === "ABSENT")
       .map((r) => Number(r.studentId));
 

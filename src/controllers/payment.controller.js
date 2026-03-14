@@ -60,6 +60,7 @@ exports.CREATE_MONTH = async (req, res) => {
     return res.status(201).json({
       message: "Oylik to'lovlar yaratildi",
       createdCount: result.count,
+      skippedCount: validStudents.length - result.count,
       month,
     });
 
@@ -227,10 +228,15 @@ exports.PAY = async (req, res) => {
 
     const payment = await prisma.payment.findFirst({
       where: { id, student: { group: { teacherId } } },
+      include: { student: { select: { isDeleted: true } } }
     });
 
     if (!payment) {
       return res.status(404).json({ message: "To'lov topilmadi" });
+    }
+
+    if (payment.student.isDeleted) {
+      return res.status(403).json({ message: "O'quvchi arxivlangan, to'lov qabul qilinmaydi" });
     }
 
     if (payment.status === "PAID") {
@@ -242,22 +248,36 @@ exports.PAY = async (req, res) => {
 
     const nextPaid = paid + payAmount;
 
+    if (nextPaid > amount) {
+      return res.status(400).json({ message: `To'lov miqdori qarzdan oshib ketdi. Qolgan qarz: ${amount - paid}` });
+    }
+
     let status = "PARTIAL";
     let paidAt = null;
 
     if (nextPaid >= amount) {
       status = "PAID";
       paidAt = new Date();
+    } else if (nextPaid === 0) {
+      status = "DUE";
     }
 
-    const updated = await prisma.payment.update({
-      where: { id },
-      data: {
-        paidAmount: nextPaid,
-        status,
-        ...(paidAt && { paidAt }),
-      },
-    });
+    const [updated, history] = await prisma.$transaction([
+      prisma.payment.update({
+        where: { id },
+        data: {
+          paidAmount: nextPaid,
+          status,
+          ...(paidAt && { paidAt }),
+        },
+      }),
+      prisma.paymentHistory.create({
+        data: {
+          paymentId: id,
+          amount: payAmount
+        }
+      })
+    ]);
 
     res.json({
       message: "To'lov qo'shildi",
@@ -265,7 +285,9 @@ exports.PAY = async (req, res) => {
         ...updated,
         amount: String(updated.amount),
         paidAmount: String(updated.paidAmount),
+        remaining: String(Math.max(0, Number(updated.amount) - Number(updated.paidAmount))),
       },
+      history
     });
 
   } catch (err) {
@@ -289,21 +311,27 @@ exports.UNPAY = async (req, res) => {
       return res.status(404).json({ message: "To'lov topilmadi" });
     }
 
-    const updated = await prisma.payment.update({
-      where: { id },
-      data: {
-        status: "DUE",
-        paidAmount: 0,
-        paidAt: null,
-      },
-    });
+    const [updated] = await prisma.$transaction([
+      prisma.payment.update({
+        where: { id },
+        data: {
+          status: "DUE",
+          paidAmount: 0,
+          paidAt: null,
+        },
+      }),
+      prisma.paymentHistory.deleteMany({
+        where: { paymentId: id }
+      })
+    ]);
 
     res.json({
-      message: "Qayta qarzdor qilindi",
+      message: "Qayta qarzdor qilindi (Tarix tozalandi)",
       payment: {
         ...updated,
         amount: String(updated.amount),
-        paidAmount: String(updated.paidAmount),
+        paidAmount: String(updated.paidAmount || 0),
+        remaining: String(Number(updated.amount) - Number(updated.paidAmount || 0))
       },
     });
 
@@ -384,5 +412,79 @@ exports.EXPORT_XLSX = async (req, res) => {
   } catch (err) {
     console.error("[PAYMENT EXPORT]", err);
     return res.status(500).json({ message: "Server xatoligi" });
+  }
+};
+// =================== UPDATE_AMOUNT ===================
+exports.UPDATE_AMOUNT = async (req, res) => {
+  try {
+    const teacherId = req.user.teacherId;
+    const id = Number(req.params.id);
+    let { amount } = req.body;
+
+    if (!Number.isFinite(id)) {
+      return res.status(400).json({ message: "ID noto'g'ri" });
+    }
+
+    // Sanitize amount: handle strings with spaces/commas
+    if (typeof amount === 'string') {
+      amount = amount.replace(/[\s,]/g, '');
+    }
+    const newAmount = Number(amount);
+
+    if (!Number.isFinite(newAmount) || newAmount < 0 || newAmount > 100000000) {
+      return res.status(400).json({ message: "Summa noto'g'ri (0 - 100,000,000 oralig'i)" });
+    }
+
+    const payment = await prisma.payment.findFirst({
+      where: { id, student: { group: { teacherId } } },
+    });
+
+    if (!payment) {
+      return res.status(404).json({ message: "To'lov topilmadi" });
+    }
+
+    const paid = Number(payment.paidAmount || 0);
+
+    if (newAmount < paid) {
+      return res.status(400).json({ message: `Yangi summa to'langan miqdordan (${paid}) kam bo'lishi mumkin emas` });
+    }
+
+    let status = "DUE";
+    if (paid > 0) {
+      status = paid >= newAmount ? "PAID" : "PARTIAL";
+    }
+
+    const updated = await prisma.payment.update({
+      where: { id },
+      data: {
+        amount: newAmount,
+        status,
+        paidAt: status === "PAID" && !payment.paidAt ? new Date() : payment.paidAt
+      },
+      include: {
+        student: {
+          select: {
+            id: true,
+            name: true,
+            parentPhone: true,
+            group: { select: { id: true, name: true } },
+          },
+        },
+      }
+    });
+
+    res.json({
+      message: "To'lov summasi yangilandi",
+      payment: {
+        ...updated,
+        amount: String(updated.amount),
+        paidAmount: String(updated.paidAmount),
+        remaining: String(Math.max(0, Number(updated.amount) - Number(updated.paidAmount))),
+      }
+    });
+
+  } catch (err) {
+    console.error("[PAYMENT UPDATE_AMOUNT]", err);
+    res.status(500).json({ message: "Server xatoligi" });
   }
 };

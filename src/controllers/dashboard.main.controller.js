@@ -33,19 +33,16 @@ exports.MAIN = async (req, res) => {
         where: { isActive: true, group: { teacherId } },
       }),
       prisma.payment.count({
-        where: { ...baseWhere, status: "DUE" },
+        where: { ...baseWhere, status: { in: ["DUE", "PARTIAL"] } },
       }),
       prisma.payment.count({
         where: { ...baseWhere, status: "PAID" },
       }),
       prisma.payment.aggregate({
-        where: { ...baseWhere, status: "DUE" },
-        _sum: { amount: true },
+        where: { ...baseWhere },
+        _sum: { amount: true, paidAmount: true },
       }),
-      prisma.payment.aggregate({
-        where: { ...baseWhere, status: "PAID" },
-        _sum: { amount: true },
-      }),
+      null, // placeholder for paidAgg if needed, but we'll use one aggregate
       prisma.group.count({
         where: { teacherId, schedules: { some: { isActive: true } } },
       }),
@@ -106,12 +103,17 @@ exports.MAIN = async (req, res) => {
     const todayLessons = todaySchedules.length;
     const todayGroups = byGroup.size;
 
-    const dueSum = dueAgg._sum.amount ?? 0;
-    const paidSum = paidAgg._sum.amount ?? 0;
+    const totalStats = dueAgg?._sum || { amount: 0, paidAmount: 0 };
+    const paidSum = Number(totalStats.paidAmount || 0);
+    const totalAmount = Number(totalStats.amount || 0);
+    const dueSum = Math.max(0, totalAmount - paidSum);
 
-    // ── Recent payments (PAID this month, top 10 by paidAt) ───────────────────
+    // ── Recent payments (Top 10 by paidAt) ────────────────────────────────────
     const recentPayments = await prisma.payment.findMany({
-      where: { ...baseWhere, status: "PAID" },
+      where: { 
+        ...baseWhere, 
+        paidAmount: { gt: 0 } 
+      },
       orderBy: { paidAt: "desc" },
       take: 10,
       include: {
@@ -121,9 +123,12 @@ exports.MAIN = async (req, res) => {
       },
     });
 
-    // ── Debtors preview (DUE this month, top 10) ──────────────────────────────
+    // ── Debtors preview (DUE or PARTIAL this month, top 10) ───────────────────
     const debtorsPreview = await prisma.payment.findMany({
-      where: { ...baseWhere, status: "DUE" },
+      where: { 
+        ...baseWhere, 
+        status: { in: ["DUE", "PARTIAL"] } 
+      },
       orderBy: { createdAt: "desc" },
       take: 10,
       include: {
@@ -133,12 +138,19 @@ exports.MAIN = async (req, res) => {
       },
     });
 
-    const formatPayment = (p) => ({
-      ...p,
-      amount: String(p.amount),
-      paidAmount: String(p.paidAmount || 0),
-      remaining: String(Math.max(0, Number(p.amount) - Number(p.paidAmount || 0))),
-    });
+    const formatPayment = (p) => {
+      const amount = Number(p.amount || 0);
+      const paidAmount = Number(p.paidAmount || 0);
+      const rem = Math.max(0, amount - paidAmount);
+      
+      return {
+        ...p,
+        amount: String(p.amount),
+        paidAmount: String(p.paidAmount || 0),
+        remainingAmount: String(rem),
+        remaining: String(rem), // backward compatibility
+      };
+    };
 
     return res.json({
       month,

@@ -6,7 +6,7 @@ module.exports = (req, res, next) => {
     parentPhone: Joi.string().pattern(/^\+998\d{9}$/).optional().allow("", null),
     isActive: Joi.boolean().optional(),
     paymentStartDate: Joi.date().iso().optional().allow(null),
-    customMonthlyFee: Joi.number().positive().optional().allow(null),
+    customMonthlyFee: Joi.number().min(0).optional().allow(null, ""),
   }).min(1);
 
   const { error, value } = schema.validate(req.body);

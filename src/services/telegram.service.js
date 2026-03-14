@@ -105,10 +105,33 @@ bot.hears("👨‍🏫 O‘qituvchi paneli", async (ctx) => {
   return bot;
 }
 
-async function sendTelegramMessage(chatId, text) {
-  const token = process.env.TELEGRAM_BOT_TOKEN;
-  if (!token) throw new Error("TELEGRAM_BOT_TOKEN yo‘q");
-  throw new Error("sendTelegramMessage: bot instance kerak.");
+async function sendMessageToPhone(bot, teacherId, phone, text) {
+  if (!bot) {
+    console.warn("⚠️ Bot instancsi yo'q, xabar yuborilmadi:", text);
+    return false;
+  }
+
+  const p = normalizeUzPhone(phone);
+  if (!p) return false;
+
+  const link = await prisma.telegramLink.findUnique({
+    where: {
+      teacherId_phone: {
+        teacherId,
+        phone: p,
+      },
+    },
+  });
+
+  if (!link || !link.chatId) return false;
+
+  try {
+    await bot.telegram.sendMessage(link.chatId, text);
+    return true;
+  } catch (err) {
+    console.error("[TG SEND MSG]", err?.message || err);
+    return false;
+  }
 }
 
-module.exports = { createTelegramBot };
+module.exports = { createTelegramBot, sendMessageToPhone };
